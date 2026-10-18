@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SMART launch - demo patient app</title>
+<style>
+  :root { --bg:#0b1220; --card:#121b2e; --fg:#e7edf7; --muted:#93a1b8; --accent:#4f8cff; --ok:#2fbf71; --err:#ff5c6c; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; font-size:13px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:14px; border:1px solid #1f2b45; }
+  .row { display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid #1c2740; font-size:14px; }
+  .row:last-child { border-bottom:none; }
+  .k { color:var(--muted); }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pill.ok { background:rgba(47,191,113,.15); color:var(--ok); }
+  .pill.high { background:rgba(255,92,108,.15); color:var(--err); }
+  .pill.low { background:rgba(255,196,0,.15); color:#ffc400; }
+  .pill.normal { background:rgba(79,140,255,.15); color:var(--accent); }
+  button { background:var(--accent); color:#fff; border:0; padding:10px 16px; border-radius:8px; font-size:14px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  .muted { color:var(--muted); font-size:13px; }
+  .err { color:var(--err); white-space:pre-wrap; font-size:13px; }
+  code { background:#0e1627; padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SMART launch demo</h1>
+  <p class="sub">Reads the authorized patient's demographics and recent lab Observations via FHIR. Public sandbox data only.</p>
+  <div id="status" class="card muted">Starting SMART launch...</div>
+  <div id="patient" class="card" style="display:none"></div>
+  <div id="obs" class="card" style="display:none"></div>
+</div>
+
+<!-- Pinned, well-known build of fhirclient.js (the standard SMART launch helper). -->
+<script src="https://cdn.jsdelivr.net/npm/fhirclient@2.5.4/build/fhir-client.js"></script>
+<script>
+"use strict";
+/*
+ * Two-step SMART App Launch (authorization code + PKCE), per the SMART App Launch IG.
+ * This file is launched FROM an EHR or a sandbox launcher, which calls it with ?iss=...&launch=...
+ * On first load it redirects to the authorization server; the server sends the browser back here
+ * with a `code`, and this script exchanges it for a token.
+ *
+ * To try it: open the public SMART sandbox launcher (https://launch.smarthealthit.org), choose
+ * "Provider EHR launch", and set the app's launch URL to wherever this file is hosted.
+ * This file is a portfolio artifact; it was not exercised against a live sandbox in this session.
+ */
+const statusEl = document.getElementById("status");
+const setStatus = (text, isError) => { statusEl.textContent = text; statusEl.className = "card " + (isError ? "err" : "muted"); };
+
+function startLaunch() {
+  FHIR.oauth2.authorize({
+    clientId: "demo-patient-app",                 // register this app with the sandbox/EHR and use the id it issues
+    scope: "launch patient/Patient.read patient/Observation.read openid fhirUser",
+    redirectUri: window.location.href.split("?")[0],
+    completeInTarget: true,
+    pkceMode: "required"                           // SMART App Launch STU2.1 requires PKCE for public clients
+  }).catch((e) => setStatus("Could not start the launch: " + e.message, true));
+}
+
+async function renderPatient(client) {
+  const p = await client.patient.read();
+  const name = (p.name && p.name[0]) ? [p.name[0].given?.join(" "), p.name[0].family].filter(Boolean).join(" ") : "(no name on file)";
+  const el = document.getElementById("patient");
+  el.style.display = "block";
+  el.innerHTML = `<div class="row"><span class="k">Name</span><span>${escapeHtml(name)}</span></div>` +
+    `<div class="row"><span class="k">Gender</span><span>${escapeHtml(p.gender || "unknown")}</span></div>` +
+    `<div class="row"><span class="k">Birth date</span><span>${escapeHtml(p.birthDate || "unknown")}</span></div>` +
+    `<div class="row"><span class="k">Patient id</span><span><code>${escapeHtml(p.id)}</code></span></div>`;
+  return p;
+}
+
+async function renderObservations(client, patientId) {
+  const el = document.getElementById("obs");
+  el.style.display = "block";
+  const bundle = await client.request(
+    `Observation?patient=${encodeURIComponent(patientId)}&category=laboratory&_sort=-date&_count=10`,
+    { pageLimit: 1 }
+  );
+  const entries = (bundle.entry || []).map((e) => e.resource);
+  if (!entries.length) { el.innerHTML = '<p class="muted">No laboratory Observations are available for this patient.</p>'; return; }
+  el.innerHTML = "<h3 style='margin-top:0'>Recent lab results</h3>" + entries.map(renderOneObs).join("");
+}
+
+function renderOneObs(o) {
+  const label = (o.code && (o.code.text || (o.code.coding && o.code.coding[0] && o.code.coding[0].display))) || "Unknown test";
+  let value = "-";
+  if (o.valueQuantity) value = `${o.valueQuantity.value} ${o.valueQuantity.unit || ""}`.trim();
+  else if (o.valueCodeableConcept) value = o.valueCodeableConcept.text || (o.valueCodeableConcept.coding && o.valueCodeableConcept.coding[0].display) || "-";
+  else if (o.valueString) value = o.valueString;
+  else if (o.dataAbsentReason) value = "(not available)";
+  const interp = (o.interpretation && o.interpretation[0] && o.interpretation[0].coding && o.interpretation[0].coding[0].code) || "";
+  const pillClass = { H: "high", HH: "high", L: "low", LL: "low", N: "normal" }[interp] || "ok";
+  const when = (o.effectiveDateTime || "").slice(0, 10);
+  return `<div class="row"><span class="k">${escapeHtml(label)} <span class="muted">${escapeHtml(when)}</span></span>` +
+    `<span>${escapeHtml(value)} ${interp ? `<span class="pill ${pillClass}">${escapeHtml(interp)}</span>` : ""}</span></div>`;
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+(async () => {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.get("code") && !params.get("launch") && !params.get("iss")) {
+    setStatus("This page must be opened from a SMART launcher or EHR (it needs ?iss= and ?launch=, or an existing session). " +
+               "Try it from https://launch.smarthealthit.org.");
+    return;
+  }
+  try {
+    if (params.get("code")) {
+      setStatus("Completing authorization...");
+    } else {
+      setStatus("Redirecting to the authorization server...");
+      return startLaunch();
+    }
+    const client = await FHIR.oauth2.ready();
+    setStatus("Loading patient data...");
+    const patient = await renderPatient(client);
+    await renderObservations(client, patient.id);
+    setStatus("Loaded from " + client.state.serverUrl);
+  } catch (e) {
+    setStatus("Launch failed: " + (e && e.message ? e.message : String(e)), true);
+  }
+})();
+</script>
+</body>
+</html>

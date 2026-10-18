@@ -1,0 +1,27 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m unittest discover -s tests -t . -v
+      - name: Convert every sample and check it validates clean
+        run: |
+          set -e
+          for f in samples/oru_*.hl7; do
+            echo "== $f"
+            python -m hl7bridge convert "$f" --out /tmp/$(basename "$f").json
+          done
+      - name: Confirm every bad sample is rejected
+        run: |
+          set -e
+          for f in samples/bad_*; do
+            if python -m hl7bridge convert "$f" > /dev/null 2>/tmp/err; then
+              echo "FAIL: $f was accepted but should have been rejected"; cat /tmp/err; exit 1
+            fi
+          done
+          echo "all bad samples correctly rejected"
