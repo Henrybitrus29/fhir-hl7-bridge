@@ -1,3 +1,4 @@
+![CI](https://github.com/Henrybitrus29/fhir-hl7-bridge/actions/workflows/ci.yml/badge.svg)
 # HL7 v2 to FHIR R4 bridge
 
 Converts HL7 v2 ORU^R01 (lab/diagnostic result) messages to FHIR R4, over an MLLP receiver or a one-shot CLI. Built as a
